@@ -4,11 +4,14 @@ from google.genai import types
 import warnings
 import logging
 import io
+import re
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.pdfgen.canvas import Canvas
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_JUSTIFY
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -35,54 +38,192 @@ def store_pdf_local(
     line_spacing: float = 1.25      
 ) -> str:
     """
-    Genera un PDF local con márgenes configurables, borde por página y paginado automático.
-    - pdf_text: texto a colocar (usa líneas en blanco para separar párrafos)
+    Genera un PDF local con soporte para markdown, márgenes configurables, borde por página y paginado automático.
+    - pdf_text: texto en markdown a convertir a PDF
     - file_path: ruta de salida
     - margin_in: margen interno en pulgadas (controla el "tamaño" del marco)
     - border_width: grosor de la línea del borde en puntos
     - line_spacing: factor de interlineado para mejorar legibilidad
     """
 
-    styles = getSampleStyleSheet()
-    base = styles["Normal"]
+    def parse_markdown_to_html(text: str) -> str:
+        """Convierte markdown básico a HTML para ReportLab"""
+        # Limpiar el texto
+        text = text.replace("\r\n", "\n")
+        
+        # Convertir títulos
+        text = re.sub(r'^# (.+)$', r'<para style="title1">\1</para>', text, flags=re.MULTILINE)
+        text = re.sub(r'^## (.+)$', r'<para style="title2">\1</para>', text, flags=re.MULTILINE)
+        text = re.sub(r'^### (.+)$', r'<para style="title3">\1</para>', text, flags=re.MULTILINE)
+        text = re.sub(r'^#### (.+)$', r'<para style="title4">\1</para>', text, flags=re.MULTILINE)
+        
+        # Convertir negritas
+        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+        text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
+        
+        # Convertir cursivas
+        text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+        text = re.sub(r'_(.+?)_', r'<i>\1</i>', text)
+        
+        # Convertir listas con viñetas
+        lines = text.split('\n')
+        in_list = False
+        result_lines = []
+        
+        for line in lines:
+            stripped = line.strip()
+            if re.match(r'^[-*+]\s+', stripped):
+                if not in_list:
+                    result_lines.append('<ul>')
+                    in_list = True
+                item_text = re.sub(r'^[-*+]\s+', '', stripped)
+                result_lines.append(f'<li>{item_text}</li>')
+            elif re.match(r'^\d+\.\s+', stripped):
+                if not in_list:
+                    result_lines.append('<ol>')
+                    in_list = True
+                item_text = re.sub(r'^\d+\.\s+', '', stripped)
+                result_lines.append(f'<li>{item_text}</li>')
+            else:
+                if in_list:
+                    result_lines.append('</ul>' if 'ul>' in result_lines[-2] else '</ol>')
+                    in_list = False
+                result_lines.append(line)
+        
+        if in_list:
+            result_lines.append('</ul>')
+        
+        text = '\n'.join(result_lines)
+        
+        # Convertir saltos de línea
+        text = text.replace('\n', '<br/>')
+        
+        return text
 
+    # Crear estilos personalizados
+    styles = getSampleStyleSheet()
+    
+    # Estilo para títulos
+    title1_style = ParagraphStyle(
+        "title1",
+        parent=styles["Heading1"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        spaceAfter=12,
+        spaceBefore=12,
+        textColor=colors.darkblue,
+        alignment=TA_LEFT
+    )
+    
+    title2_style = ParagraphStyle(
+        "title2",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        spaceAfter=10,
+        spaceBefore=10,
+        textColor=colors.darkblue,
+        alignment=TA_LEFT
+    )
+    
+    title3_style = ParagraphStyle(
+        "title3",
+        parent=styles["Heading3"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        spaceAfter=8,
+        spaceBefore=8,
+        textColor=colors.darkblue,
+        alignment=TA_LEFT
+    )
+    
+    title4_style = ParagraphStyle(
+        "title4",
+        parent=styles["Heading4"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        spaceAfter=6,
+        spaceBefore=6,
+        textColor=colors.darkblue,
+        alignment=TA_LEFT
+    )
+    
+    # Estilo para párrafos normales
     normal_style = ParagraphStyle(
         "Body",
-        parent=base,
+        parent=styles["Normal"],
         fontName="Helvetica",
         fontSize=11,
         leading=int(11 * line_spacing),
-        spaceAfter=6
+        spaceAfter=6,
+        alignment=TA_JUSTIFY
+    )
+    
+    # Estilo para listas
+    list_style = ParagraphStyle(
+        "List",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=10,
+        leading=int(10 * line_spacing),
+        spaceAfter=3,
+        leftIndent=20,
+        bulletIndent=10
     )
 
-
     story = []
-
-    blocks = pdf_text.replace("\r\n", "\n").split("\f")
+    
+    # Convertir markdown a HTML
+    html_content = parse_markdown_to_html(pdf_text)
+    
+    # Dividir en bloques por saltos de página
+    blocks = html_content.split("\f")
+    
     for i, block in enumerate(blocks):
-
-        for para in [p for p in block.split("\n\n") if p.strip()]:
-            story.append(Paragraph(para.strip().replace("\n", "<br/>"), normal_style))
+        # Dividir en párrafos
+        paragraphs = [p.strip() for p in block.split("<br/><br/>") if p.strip()]
+        
+        for para in paragraphs:
+            if para.startswith('<para style="title1">'):
+                content = para.replace('<para style="title1">', '').replace('</para>', '')
+                story.append(Paragraph(content, title1_style))
+            elif para.startswith('<para style="title2">'):
+                content = para.replace('<para style="title2">', '').replace('</para>', '')
+                story.append(Paragraph(content, title2_style))
+            elif para.startswith('<para style="title3">'):
+                content = para.replace('<para style="title3">', '').replace('</para>', '')
+                story.append(Paragraph(content, title3_style))
+            elif para.startswith('<para style="title4">'):
+                content = para.replace('<para style="title4">', '').replace('</para>', '')
+                story.append(Paragraph(content, title4_style))
+            elif para.startswith('<ul>') or para.startswith('<ol>'):
+                # Manejar listas
+                list_items = re.findall(r'<li>(.*?)</li>', para)
+                for item in list_items:
+                    story.append(Paragraph(f"• {item}", list_style))
+            else:
+                # Párrafo normal
+                story.append(Paragraph(para, normal_style))
+            
             story.append(Spacer(1, 6))
+        
         if i < len(blocks) - 1:
             story.append(PageBreak())
-
 
     PAGE_W, PAGE_H = letter
     margin = margin_in * inch
 
-
     def draw_border(canv: Canvas, doc):
         canv.saveState()
         canv.setLineWidth(border_width)
-
+        canv.setStrokeColor(colors.darkblue)
+        
         x = margin
         y = margin
         w = PAGE_W - 2 * margin
         h = PAGE_H - 2 * margin
         canv.rect(x, y, w, h) 
         canv.restoreState()
-
 
     doc = SimpleDocTemplate(
         file_path,
@@ -92,7 +233,6 @@ def store_pdf_local(
         topMargin=margin,
         bottomMargin=margin
     )
-
     
     doc.build(story, onFirstPage=draw_border, onLaterPages=draw_border)
     return f"PDF guardado en {file_path}"
